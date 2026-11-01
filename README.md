@@ -26,6 +26,13 @@ npm run routes           # print every endpoint
 npm test                 # 84 tests, no network required
 ```
 
+**Deployed at** `https://middleware-neon.vercel.app` — every path below works
+against that base URL as well as localhost:
+
+```bash
+curl "https://middleware-neon.vercel.app/api/track?order=1001"
+```
+
 Node >= 20.6 (the `--env-file` flag and `AbortSignal.timeout` are both used).
 There are no dependencies — `package-lock.json` has an empty tree on purpose.
 
@@ -477,6 +484,49 @@ built response even when the upstream sends them anyway.
 
 ---
 
+## Test orders
+
+The Status API mock has **no shipment for orders 1001-1009** — which are exactly the
+numbers you reach for first. `/api/track?order=1001` correctly returns the order with
+`shipmentError: NO_SHIPMENT`; that is not a bug. Use `1010` or above when you want
+shipment data.
+
+Scanned across the store's 109 orders (#1001-#1109): 91 have a shipment, 14 return
+404, 4 return 5xx.
+
+| Delivery status | Orders |
+| --- | --- |
+| `ORDER_PLACED` | 1017, 1033, 1049, 1077, 1103, 1109 |
+| `PICKUP_COMPLETE` | 1053, 1057, 1061, 1073, 1092, 1093, 1108 |
+| `IN_TRANSIT` | 1010, 1011, 1013, 1046, 1047, 1048, 1056, 1058, 1062, 1065, 1068, 1090, 1096, 1098, 1100, 1101, 1105, 1106 |
+| `OUT_FOR_DELIVERY` | 1023, 1036, 1088, 1089, 1091, 1107 |
+| `DELIVERED` | 1012, 1020, 1021, 1022, 1024, 1040, 1042, 1045, 1050, 1054, 1067, 1069, 1070, 1079, 1080, 1084, 1085, 1095, 1099 |
+| `DELIVERY_FAILED` | 1015, 1039, 1055, 1104 |
+| `HELD_AT_CUSTOMS` | 1030, 1052, 1094 |
+| `CANCELLED` | 1014, 1016, 1043, 1082, 1102 |
+| `RTO_INITIATED` | 1026, 1072, 1076, 1097 |
+| `RTO_DELIVERED` | 1032, 1035, 1083 |
+| `RETURN_INITIATED` | 1019, 1051, 1063, 1071, 1087 |
+| `RETURN_PICKED_UP` | 1060, 1066, 1086 |
+| `RETURNED` | 1018, 1027, 1031, 1074 |
+
+Edge cases worth wiring into UI work:
+
+| Case | Orders | What the response looks like |
+| --- | --- | --- |
+| No shipment yet | 1001-1009, 1028, 1037, 1041, 1044, 1059 | `shipment: null`, `shipmentError.code: NO_SHIPMENT` |
+| Upstream 500 | 1029, 1064, 1081 | `shipmentError.code: STATUS_UNAVAILABLE` |
+| Upstream 503 / slow | 1034 | `STATUS_UNAVAILABLE`, or `STATUS_TIMEOUT` when it exceeds the timeout |
+| Return flow (`flow: "return"`) | 1018, 1019, 1027, 1031, 1051, 1060, 1063, 1066, 1071, 1074, 1086, 1087 | |
+| Very long `status_label` | 1025, 1075 | A label that must wrap or truncate in the UI |
+| Cancelled in Shopify | 1043, 1065, 1082, 1102, 1105 | `statusSource: "shopify"`, tracking suppressed |
+
+Note that 1065 and 1105 are cancelled in Shopify while the Status API still reports
+`IN_TRANSIT` — these are the orders that exercise the
+[conflict rule](#conflict-rules-who-wins).
+
+---
+
 ## Testing
 
 ```bash
@@ -510,6 +560,15 @@ responses land in `./recon`, which is gitignored.
 Vercel zero-config: `api/**.js` become serverless functions automatically. Set the
 env vars in project settings and push. `dev-server.js` and `scripts/` are not part
 of the deployed surface.
+
+Live at `https://middleware-neon.vercel.app`. Because `.env` is gitignored and never
+deployed, each variable in the [Configuration](#configuration) table has to be set
+in Vercel project settings separately — including `ADMIN_API_KEY`, without which the
+two `/api/orders*` routes answer `500 CONFIG_ERROR` instead of serving.
+
+A quick way to tell whether the deployed instance is configured, without needing the
+key: `curl -s https://middleware-neon.vercel.app/api/orders` should answer `401
+UNAUTHORIZED`. A `500 CONFIG_ERROR` means `ADMIN_API_KEY` is missing in Vercel.
 
 Nothing in the code is Vercel-specific beyond the three files in `api/`. The cores
 are plain `(req) => response` functions, so Cloudflare Workers or a long-running
