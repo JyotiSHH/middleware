@@ -1,19 +1,26 @@
 # order-tracking middleware
 
-HTTP middleware that sits between a Shopify storefront and two upstream APIs, and
-returns **PII-free** JSON the theme can render directly.
+A small API that sits between a Shopify store and two other services. It collects
+order and delivery data, strips out anything personal, and returns clean JSON that
+the storefront can show directly.
 
-It exists because the browser cannot be trusted with either upstream:
+## Why it exists
 
-- the **Shopify Admin API** needs a secret and would happily return the customer's
-  name, email, phone and address alongside the order;
-- the **Status API** (the carrier/shipment service) needs its own key and has a
-  30 req/min budget.
+The order tracking page needs two things:
 
-So the middleware holds both credentials server-side, asks each upstream for only
-the fields the UI renders, merges them, and hands back a response that contains no
-personal data at all. A shopper who opens devtools sees item titles, quantities,
-money and milestones — never their own address.
+1. **Order data** from the **Shopify Admin API** (what was bought, how much it cost).
+2. **Delivery data** from the **Status API** (where the parcel is right now).
+
+The browser cannot call either one:
+
+- Shopify needs a secret password. It also sends back the customer's name, email,
+  phone and address, which we do not want on the page.
+- The Status API needs its own key, and only allows 30 requests per minute.
+
+So this service keeps both keys on the server. It asks each service for only the
+fields the page shows, joins the two answers together, and sends back a result with
+**no personal data in it at all**. If a shopper opens their browser dev tools, they
+see product names, quantities, prices and delivery steps. They never see an address.
 
 ---
 
@@ -22,49 +29,42 @@ money and milestones — never their own address.
 ```bash
 cp .env.example .env     # then fill in the values
 npm run dev              # http://localhost:3000
-npm run routes           # print every endpoint
-npm test                 # 94 tests, no network required
+npm run routes           # list every endpoint
+npm test                 # 84 tests, no internet needed
 ```
 
-**Deployed at** `https://middleware-neon.vercel.app` — every path below works
-against that base URL as well as localhost:
+It is already running here:
 
 ```bash
-curl "https://middleware-neon.vercel.app/api/track?order=1001"
+curl "https://middleware-neon.vercel.app/api/track?order=1010"
 ```
 
-Node >= 20.6 (the `--env-file` flag and `AbortSignal.timeout` are both used).
-There are no dependencies — `package-lock.json` has an empty tree on purpose.
+You need Node 20.6 or newer. There are no packages to install.
 
 ---
 
-## The APIs
+## The endpoints
 
-| Method | Path | Auth | Returns |
+| Method | Path | Who can call it | What you get |
 | --- | --- | --- | --- |
-| GET | `/` (and `/api`) | public | Health check |
-| GET | `/api/track?order=1001` | public | One order + live shipment, for the storefront |
-| GET | `/api/orders` | `x-api-key` | All orders, newest first, cursor-paginated |
-| GET | `/api/orders/1001` | `x-api-key` | Full detail for one order |
+| GET | `/` (and `/api`) | anyone | Health check |
+| GET | `/api/track?order=1001` | anyone | One order plus its delivery status |
+| GET | `/api/orders` | needs a key | A list of all orders |
+| GET | `/api/orders/1001` | needs a key | Everything about one order |
 
-`npm run routes` prints the same table in the terminal, reading `src/routes.js`, so
-the CLI and this table cannot drift apart.
+`npm run routes` prints this same list in your terminal. It reads `src/routes.js`,
+so the terminal list and this table always match.
 
-Every response is `application/json; charset=utf-8` with `X-Content-Type-Options:
-nosniff`. Success is always `{ "ok": true, ... }` and failure is always
-`{ "ok": false, "error": { code, message, retryable } }`. Every response is
-`Cache-Control: no-store`.
+Every reply is JSON. When things work you get `{ "ok": true, ... }`. When they do
+not you get `{ "ok": false, "error": { code, message, retryable } }`. Nothing is
+cached.
 
 ---
 
-### 0. `GET /` — public, health check
+### 1. `GET /` — health check
 
-The base URL is the health check. `/` rewrites to `/api` via `vercel.json`, so the
-bare domain answers instead of returning Vercel's 404 page.
-
-It makes **no upstream call**, so an uptime monitor can poll it as often as it likes
-for free, and it needs **no key** — a broken deploy has to stay diagnosable before
-anything else works.
+Call this to check the service is alive. Anyone can call it, and it does not talk to
+Shopify or the Status API, so you can check it as often as you like.
 
 ```bash
 curl https://middleware-neon.vercel.app/
@@ -82,47 +82,41 @@ curl https://middleware-neon.vercel.app/
 }
 ```
 
-A missing required env var returns **503** with the **names** of what is missing, so
-an uptime monitor treats a misconfigured deploy as down:
+If a setting is missing you get **503** and a list of which ones:
 
 ```json
 {
   "ok": false,
   "status": "unhealthy",
-  "service": "order-tracking-middleware",
-  "version": "1.0.0",
-  "uptimeSeconds": 0,
-  "timestamp": "2026-11-01T18:02:11.427Z",
   "checks": { "config": { "ok": false, "missing": ["STATUS_API_KEY"] } }
 }
 ```
 
-Values are never included, only names. `uptimeSeconds` is per serverless instance,
-so it resets on a cold start.
+It only ever lists the **names** of missing settings, never their values.
 
 ---
 
-### 1. `GET /api/track?order=1001` — public
+### 2. `GET /api/track?order=1001` — for the storefront
 
-What the theme's order-tracking section calls. **Public: any origin may read it**
-(`Access-Control-Allow-Origin: *`), which is safe because the body is PII-free, but
-it does mean anyone can spend the upstream quotas. See
-[Rate limiting](#rate-limiting-the-open-question).
+This is the one the storefront page calls. **Anyone can call it from any website**
+(`Access-Control-Allow-Origin: *`). That is safe because the reply has no personal
+data in it. But it does mean strangers can use up our Shopify and Status API
+allowance. See [What still needs doing](#what-still-needs-doing).
 
-| Param | Required | Notes |
+| Setting | Required? | Notes |
 | --- | --- | --- |
-| `order` | yes | `1001` or `#1001`. Digits only, max 10. |
+| `order` | yes | `1001` or `#1001`. Numbers only, up to 10 digits. |
 
 ```bash
-curl "https://middleware-neon.vercel.app/api/track?order=1001"
+curl "https://middleware-neon.vercel.app/api/track?order=1010"
 ```
 
 ```json
 {
   "ok": true,
   "order": {
-    "orderNumber": "1001",
-    "name": "#1001",
+    "orderNumber": "1010",
+    "name": "#1010",
     "createdAt": "2026-03-24T13:22:53Z",
     "cancelledAt": null,
     "total": { "amount": "1263.95", "currencyCode": "INR" },
@@ -132,7 +126,7 @@ curl "https://middleware-neon.vercel.app/api/track?order=1001"
         "title": "The Collection Snowboard: Liquid",
         "variantTitle": null,
         "quantity": 1,
-        "image": { "url": "https://cdn.shopify.com/...240x240.jpg", "alt": "Top and bottom view of a snowboard..." },
+        "image": { "url": "https://cdn.shopify.com/...240x240.jpg", "alt": "A snowboard" },
         "hasProduct": true
       }
     ],
@@ -142,9 +136,9 @@ curl "https://middleware-neon.vercel.app/api/track?order=1001"
     "flow": "forward",
     "status": "IN_TRANSIT",
     "statusLabel": "In transit",
-    "expectedDelivery": "2026-03-28T00:00:00Z",
+    "expectedDelivery": "2026-10-28",
     "deliveredAt": null,
-    "tracking": { "id": "BD123", "carrier": "BlueDart", "url": "https://track.example/BD123" },
+    "tracking": { "id": "BD123", "carrier": "Bluedart", "url": "https://track.example/BD123" },
     "milestones": [
       { "code": "ORDER_PLACED", "label": "Order Placed", "state": "completed", "timestamp": "2026-03-24T13:22:53Z" },
       { "code": "IN_TRANSIT", "label": "In transit", "state": "current", "timestamp": "2026-03-25T09:00:00Z" },
@@ -159,9 +153,9 @@ curl "https://middleware-neon.vercel.app/api/track?order=1001"
 }
 ```
 
-**`shipment` and `shipmentError` are complements, never both set.** A failed status
-lookup must not hide the order, so the order still returns `200` with
-`shipment: null` and a reason:
+**You get either `shipment` or `shipmentError`, never both.** If the delivery lookup
+fails we still send the order back with a `200`, because a broken delivery lookup
+should not hide the order:
 
 ```json
 {
@@ -173,27 +167,28 @@ lookup must not hide the order, so the order still returns `200` with
 }
 ```
 
-`statusSource` is `"status_api"` normally, or `"shopify"` when the order is
-cancelled — see [Conflict rules](#conflict-rules-who-wins).
+`statusSource` is normally `"status_api"`. It becomes `"shopify"` when the order was
+cancelled — see [When the two services disagree](#when-the-two-services-disagree).
 
 ---
 
-### 2. `GET /api/orders` — admin key
+### 3. `GET /api/orders` — list all orders
 
-All orders, newest first (`sortKey: CREATED_AT, reverse: true`).
+Needs a key. Newest orders come first.
 
-| Param | Default | Notes |
+| Setting | Default | Notes |
 | --- | --- | --- |
-| `limit` | `25` | 1-250 (Shopify's connection ceiling) |
-| `cursor` | - | `pageInfo.endCursor` from the previous page |
+| `limit` | `25` | Between 1 and 250 |
+| `cursor` | - | Use `pageInfo.endCursor` from the page before |
 | `status` | - | `open`, `closed`, `cancelled`, `any` |
 | `financialStatus` | - | `paid`, `pending`, `refunded`, `partially_refunded`, `partially_paid`, `authorized`, `voided`, `expired`, `unpaid` |
 | `fulfillmentStatus` | - | `fulfilled`, `unfulfilled`, `partial`, `shipped`, `unshipped` |
-| `createdAtMin` | - | ISO 8601 |
-| `createdAtMax` | - | ISO 8601 |
+| `createdAtMin` | - | A date, like `2026-01-01` |
+| `createdAtMax` | - | A date |
 
 ```bash
-curl -H "x-api-key: $ADMIN_API_KEY" \n  "https://middleware-neon.vercel.app/api/orders?limit=25&status=open"
+curl -H "x-api-key: $ADMIN_API_KEY" \
+  "https://middleware-neon.vercel.app/api/orders?limit=25&status=open"
 ```
 
 ```json
@@ -212,7 +207,7 @@ curl -H "x-api-key: $ADMIN_API_KEY" \n  "https://middleware-neon.vercel.app/api/
           "title": "Selling Plans Ski Wax",
           "variantTitle": "Selling Plans Ski Wax",
           "quantity": 1,
-          "image": { "url": "https://cdn.shopify.com/...240x240.png", "alt": "A bar of golden yellow wax" },
+          "image": { "url": "https://cdn.shopify.com/...240x240.png", "alt": "A bar of wax" },
           "hasProduct": true
         }
       ],
@@ -223,24 +218,24 @@ curl -H "x-api-key: $ADMIN_API_KEY" \n  "https://middleware-neon.vercel.app/api/
 }
 ```
 
-Each entry is the **same shape** `/api/track` returns under `order`, because both go
-through `buildOrder()` in `src/merge.js`. One mapper, not two.
+Each order here has the **same shape** as the `order` part of `/api/track`. Both use
+the same code (`buildOrder()` in `src/merge.js`), so there is only one place to
+change if the shape needs to change.
 
-Two deliberate omissions:
+Two things this endpoint leaves out on purpose:
 
-- **No shipment data.** That would be one Status API call per order against a
-  30 req/min key. Use `/api/orders/:orderNumber` when you need shipment.
-- **Line items are capped at 10 per order** here, since that cost is paid for every
-  order in the page. `hasMoreLineItems` flags the rest.
+- **No delivery status.** That would mean one Status API call per order, and that API
+  only allows 30 per minute. Use `/api/orders/1001` when you need delivery status.
+- **Only 10 items per order.** A list of 25 orders would otherwise pull hundreds of
+  items. `hasMoreLineItems` tells you when an order has more.
 
-Filters are never passed through to Shopify raw. Each one is validated against an
-allow-list (or parsed as a date) and re-serialised into Shopify's search syntax, so
-a crafted `?status=open OR status:closed` cannot rewrite the query. Invalid input
-returns `400 INVALID_QUERY` **before** any upstream call.
+Filters are checked against a fixed list of allowed values before they are used. So
+something like `?status=open OR status:closed` cannot sneak extra search terms into
+the Shopify query. A bad filter returns `400 INVALID_QUERY` and no call is made.
 
-#### Fetching genuinely every order
+#### Getting every single order
 
-The endpoint returns one page. Loop on the cursor:
+One call gives you one page. Keep going until `hasNextPage` is false:
 
 ```bash
 C=""
@@ -253,16 +248,16 @@ while :; do
 done
 ```
 
-Draining inside the endpoint was rejected on purpose: on a large store it would
-exceed the serverless timeout mid-response, leaving the caller with a truncated body
-and no cursor to resume from.
+The endpoint does not fetch every page for you. On a big store that would take too
+long and the request would time out halfway, leaving you with a broken reply and no
+way to carry on.
 
 ---
 
-### 3. `GET /api/orders/1001` — admin key
+### 4. `GET /api/orders/1001` — one order in full
 
-Everything on one order: the full money breakdown, fulfillments with tracking, SKUs
-and per-item refund/fulfillment quantities — plus the same merged `shipment` block
+Needs a key. Gives you the full price breakdown, every delivery attempt, product
+codes, and how many items were refunded — plus the same delivery status that
 `/api/track` returns.
 
 ```bash
@@ -323,7 +318,7 @@ curl -H "x-api-key: $ADMIN_API_KEY" https://middleware-neon.vercel.app/api/order
         "requiresShipping": true,
         "unitPrice":       { "amount": "749.95", "currencyCode": "INR" },
         "discountedTotal": { "amount": "749.95", "currencyCode": "INR" },
-        "image": { "url": "https://cdn.shopify.com/...240x240.jpg", "alt": "..." },
+        "image": { "url": "https://cdn.shopify.com/...240x240.jpg", "alt": "A snowboard" },
         "hasProduct": true
       }
     ],
@@ -335,214 +330,126 @@ curl -H "x-api-key: $ADMIN_API_KEY" https://middleware-neon.vercel.app/api/order
 }
 ```
 
-Money stays a **string** throughout (`"1263.95"`, not `1263.95`) so nothing is lost
-rounding through a float. `currentQuantity` is `quantity` minus anything refunded or
-removed by an order edit.
+Prices are always **text**, like `"1263.95"`, not numbers. Numbers can lose the last
+penny when a computer rounds them, text cannot.
 
-Unlike `/api/orders`, this endpoint pages through **all** line items — 50 per
-request, capped at 10 pages (500 items). `hasMoreLineItems` is only `true` for an
-order past that cap.
+`quantity` is what was ordered. `currentQuantity` is what is left after refunds or
+changes to the order.
+
+This endpoint fetches **all** the items on the order, 50 at a time, up to 500 in
+total. `hasMoreLineItems` is only true for an order bigger than that.
 
 ---
 
-## Authentication
+## The key for admin endpoints
 
-`/api/track` is public. The two `/api/orders*` endpoints require a shared key:
+`/` and `/api/track` are open to anyone. The two `/api/orders` endpoints need a key
+in a header:
 
 ```
 x-api-key: <ADMIN_API_KEY>
 ```
 
-| Rule | Why |
-| --- | --- |
-| Compared with `crypto.timingSafeEqual` | A plain `===` leaks the matching prefix through timing. |
-| Checked **before** the order number is parsed | Otherwise 401-vs-404 tells an unauthenticated caller which order numbers exist. |
-| Unset `ADMIN_API_KEY` means `500 CONFIG_ERROR` and the endpoint is disabled | Fails closed. An empty env var must never mean "let everyone in". |
-| **No CORS headers at all** on admin endpoints | The key must never ship to browser JS. These are server-to-server only, and no `Access-Control-Allow-Origin` means no origin can read them. |
+Make one like this: `node -e "console.log(crypto.randomUUID())"`
 
-Generate a key with `node -e "console.log(crypto.randomUUID())"`.
+Four rules, and why each one is there:
+
+| Rule | Reason |
+| --- | --- |
+| The key is compared using `crypto.timingSafeEqual` | A normal `===` check finishes faster when the first letters are wrong. Someone could time the replies and guess the key letter by letter. |
+| The key is checked **before** the order number is read | Otherwise a `401` for a bad key and a `404` for a missing order would tell a stranger which order numbers are real. |
+| If `ADMIN_API_KEY` is not set, these endpoints turn off and return `500` | An empty setting must never mean "let everybody in". |
+| These endpoints send **no CORS headers** | The key must never be put in website code, where anyone could read it. These are for server-to-server calls only. |
 
 ---
 
 ## Errors
 
+Every error looks the same:
+
 ```json
 { "ok": false, "error": { "code": "ORDER_NOT_FOUND", "message": "No order #9999", "retryable": false } }
 ```
 
-`code` is machine-readable and stable — map it to a locale string in the theme.
-`message` is for developers and should never be shown to a shopper as-is.
+Use `code` in your own code. It never changes, so you can match on it and show your
+own message. `message` is for developers, so do not show it to a shopper.
+`retryable` tells you whether trying again might help.
 
-### Request errors
+### When the request is wrong
 
 | Code | HTTP | Meaning |
 | --- | --- | --- |
-| `INVALID_ORDER_NUMBER` | 400 | `order` is not 1-10 digits (optionally `#`-prefixed) |
-| `INVALID_QUERY` | 400 | A `/api/orders` filter failed validation |
-| `UNAUTHORIZED` | 401 | Missing or wrong `x-api-key` |
-| `ORDER_NOT_FOUND` | 404 | No order with that exact name |
-| `METHOD_NOT_ALLOWED` | 405 | Anything but `GET` (response carries `Allow: GET`) |
+| `INVALID_ORDER_NUMBER` | 400 | `order` was not 1 to 10 digits |
+| `INVALID_QUERY` | 400 | A filter on `/api/orders` was not valid |
+| `UNAUTHORIZED` | 401 | The `x-api-key` header is missing or wrong |
+| `ORDER_NOT_FOUND` | 404 | No order with that exact number |
+| `METHOD_NOT_ALLOWED` | 405 | You used something other than `GET` |
 
-### Upstream and server errors
+### When something breaks on our side
 
-| Code | HTTP | `retryable` | Meaning |
+| Code | HTTP | Retryable | Meaning |
 | --- | --- | --- | --- |
-| `CONFIG_ERROR` | 500 | no | A required env var is missing |
-| `INTERNAL_ERROR` | 500 | yes | Unexpected crash; details stay in the logs |
-| `ORDER_LOOKUP_FAILED` | 502 | yes | Shopify unreachable, or returned an error |
-| `ORDER_LOOKUP_TIMEOUT` | 504 | yes | Shopify exceeded `SHOPIFY_TIMEOUT_MS` |
+| `CONFIG_ERROR` | 500 | no | A required setting is missing |
+| `INTERNAL_ERROR` | 500 | yes | Something unexpected broke. Details stay in the logs. |
+| `ORDER_LOOKUP_FAILED` | 502 | yes | Could not reach Shopify, or Shopify sent an error |
+| `ORDER_LOOKUP_TIMEOUT` | 504 | yes | Shopify was too slow |
 
-### `shipmentError` codes
+### Delivery status problems (`shipmentError`)
 
-These never fail the request — the order still returns `200`.
+These never break the request. You still get the order and a `200`.
 
-| Code | `retryable` | Meaning |
+| Code | Retryable | Meaning |
 | --- | --- | --- |
-| `NO_SHIPMENT` | yes | Status API 404: no shipment created yet |
-| `STATUS_RATE_LIMITED` | yes | Status API 429. Carries `retryAfter` in seconds when sent. |
-| `STATUS_TIMEOUT` | yes | Exceeded `STATUS_TIMEOUT_MS` |
-| `STATUS_UNAVAILABLE` | yes | 5xx, a network failure, or an empty body |
-| `STATUS_CONFIG_ERROR` | no | 401/403: **our** key is wrong. Retrying cannot fix it. |
+| `NO_SHIPMENT` | yes | The parcel has not been created yet. **Very common — see [Orders you can test with](#orders-you-can-test-with).** |
+| `STATUS_RATE_LIMITED` | yes | Too many requests. Sometimes includes `retryAfter` in seconds. |
+| `STATUS_TIMEOUT` | yes | The Status API was too slow |
+| `STATUS_UNAVAILABLE` | yes | The Status API is down, or sent back nothing |
+| `STATUS_CONFIG_ERROR` | no | **Our** key is wrong. Trying again will not help. |
+
+> **Note for the storefront page:** do not show the same message for all of these.
+> `NO_SHIPMENT` means the parcel has not shipped yet, so "try again in a moment" is
+> wrong and misleading. Only `STATUS_TIMEOUT`, `STATUS_UNAVAILABLE` and
+> `STATUS_RATE_LIMITED` should suggest trying again.
 
 ---
 
-## Configuration
+## Settings
 
-All via environment variables (`.env` locally, project settings on Vercel).
+All settings are environment variables. Use `.env` on your machine, and the project
+settings page on Vercel.
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `SHOP_DOMAIN` | yes | - | `your-store.myshopify.com`. Scheme and trailing slash are stripped. |
-| `SHOPIFY_CLIENT_ID` | yes | - | Custom app, client credentials grant |
+| `SHOP_DOMAIN` | yes | - | Like `your-store.myshopify.com` |
+| `SHOPIFY_CLIENT_ID` | yes | - | From your custom Shopify app |
 | `SHOPIFY_CLIENT_SECRET` | yes | - | |
-| `SHOPIFY_API_VERSION` | no | `2026-10` | Pin to a stable version |
-| `STATUS_API_BASE` | yes | - | Trailing slash stripped |
-| `STATUS_API_KEY` | yes | - | Sent as `x-api-key` upstream |
-| `ADMIN_API_KEY` | no | - | Required *by* `/api/orders*`; unset disables them |
-| `SHOPIFY_TIMEOUT_MS` | no | `5000` | |
-| `STATUS_TIMEOUT_MS` | no | `7000` | |
+| `SHOPIFY_API_VERSION` | no | `2026-10` | |
+| `STATUS_API_BASE` | yes | - | The Status API address |
+| `STATUS_API_KEY` | yes | - | The Status API key |
+| `ADMIN_API_KEY` | no | - | Needed for the `/api/orders` endpoints. Leave it empty to turn them off. |
+| `SHOPIFY_TIMEOUT_MS` | no | `5000` | How long to wait for Shopify |
+| `STATUS_TIMEOUT_MS` | no | `7000` | How long to wait for the Status API |
 
-A missing required variable is reported once as `CONFIG_ERROR` with the variable
-**names** logged — never the values. There is no `ALLOWED_ORIGINS`: `/api/track` is
-public, and the admin endpoints are key-protected rather than origin-protected.
+If a required setting is missing, the log says which **names** are missing. It never
+logs the values.
 
-The Shopify app needs `read_orders` only. Do not grant `read_customers` — nothing
-here uses it, and not having it means a bug cannot leak customer data.
-
----
-
-## How it is built
-
-```
-api/                        thin platform adapters (Vercel file routes)
-  index.js                  ->  /api   (and / via vercel.json): health check
-  track.js                  ->  /api/track
-  orders/index.js           ->  /api/orders
-  orders/[order].js         ->  /api/orders/:orderNumber
-src/
-  health-handler.js         core: the index health check
-  handler.js                core: /api/track
-  order-list-handler.js     core: /api/orders
-  order-details-handler.js  core: /api/orders/:orderNumber
-  order-list.js             query-string validation for the list endpoint
-  routes.js                 service name/version, and the route table for the CLI
-  validate.js               order-number validation
-  auth.js                   timing-safe admin key check
-  config.js                 env -> config object, with a fail-fast check
-  cors.js                   CORS headers for the public endpoint
-  errors.js                 AppError: code + HTTP status + retryable
-  shopify.js                Admin GraphQL client: token cache, retry, backoff
-  status-api.js             Status API client (never throws)
-  merge.js                  upstream JSON -> the public order/shipment shape
-  order-details.js          upstream JSON -> the full order shape
-scripts/
-  routes.js                 npm run routes printer, and the dev banner
-  sweep.js                  recon: run every test order through both upstreams
-test/                       node:test, no network, no fixtures on disk
-dev-server.js               local server mirroring the Vercel routes
-vercel.json                 one rewrite: / -> /api
-```
-
-**Adapters are deliberately dumb.** Each `api/*.js` file does nothing but pass
-`{ method, url, apiKey }` into a handler core and write `{ status, headers, body }`
-back out. The cores are plain functions with no knowledge of Node's `req`/`res`, so
-the whole surface is testable without a socket, and moving off Vercel means
-rewriting three thin files.
-
-**Dependencies are injectable.** Each core takes a `deps` object
-(`{ getConfig, lookupOrder, fetchShipment, ... }`) defaulting to the real modules.
-Tests pass fakes and assert on call counts — which is how "no upstream call was
-made" is proven rather than assumed.
-
-### Upstream clients
-
-`src/shopify.js` holds everything the Admin API demands:
-
-- **Token caching.** The client-credentials token is cached in module scope — which
-  survives between requests while a serverless instance stays warm — and refreshed
-  5 minutes before expiry. Parallel requests share one in-flight token promise, so a
-  cold start with concurrent traffic fetches one token, not one per request.
-- **Retry.** Up to 3 attempts. A `401` forces a token refresh and retries; `429` and
-  `5xx` back off (honouring `Retry-After`).
-- **Cost-aware throttling.** On a `THROTTLED` error it reads
-  `extensions.cost.throttleStatus` and waits exactly long enough for the leaky
-  bucket to refill the points this query needs, instead of guessing.
-
-`src/status-api.js` **never throws**. It returns `{ shipment, error, httpStatus }`,
-because a shipment lookup failing must never take the order summary down with it.
-
-### Conflict rules: who wins
-
-The two upstreams can disagree. The rules are fixed, not per-caller:
-
-1. **Shopify owns the order lifecycle.** If Shopify says the order is cancelled, the
-   response shows cancelled no matter what the Status API thinks — and the Status
-   API is not even called. `statusSource` becomes `"shopify"`.
-2. A cancelled order shows **no tracking, no expected date and no later
-   milestones**; they would be actively misleading. Just `ORDER_PLACED` then
-   `CANCELLED`.
-3. **The Status API owns shipment movement** for every non-cancelled order.
-4. **Exact order-name match only.** Shopify's search matches loosely, so
-   `name:#1001` can return `#10011`. Anything but an exact `name` match is treated
-   as not found.
-
-### Why everything is a whitelist
-
-`merge.js` and `order-details.js` pick every field **by name**. Nothing is spread or
-passed through. Consequences:
-
-- A new field either upstream starts returning — including a new customer field — is
-  dropped, not forwarded. Privacy does not depend on remembering to update a
-  blocklist.
-- Bad data degrades instead of breaking the page: an unparseable timestamp becomes
-  `null` (so the UI shows "Date unavailable", never "Invalid Date"), an unknown
-  milestone `state` becomes `pending`, and an unknown fulfillment status becomes
-  `null`.
-- Only `http(s)` URLs survive, so a `javascript:` tracking URL cannot reach the DOM.
-- `variantTitle: "Default Title"` — Shopify's placeholder for single-variant
-  products — becomes `null` so the theme does not render it.
-- A missing label is humanised from the code: `HELD_AT_CUSTOMS` becomes
-  "Held at customs".
-
-The PII guarantee is enforced two ways: the GraphQL queries never *request*
-`customer`, `email`, `phone`, `shippingAddress`, `billingAddress` or `note` (so PII
-never reaches this process), and a test asserts those values cannot appear in a
-built response even when the upstream sends them anyway.
-
-> `note` is excluded on purpose. It looks harmless, but shoppers routinely type
-> phone numbers and addresses into order notes.
+The Shopify app only needs `read_orders` permission. **Do not give it
+`read_customers`.** Nothing here uses it, and without it even a bug could not leak
+customer details.
 
 ---
 
-## Test orders
+## Orders you can test with
 
-The Status API mock has **no shipment for orders 1001-1009** — which are exactly the
-numbers you reach for first. `/api/track?order=1001` correctly returns the order with
-`shipmentError: NO_SHIPMENT`; that is not a bug. Use `1010` or above when you want
-shipment data.
+The Status API has **no delivery data for orders 1001 to 1009**. Those are the first
+numbers most people try, so it can look like the service is broken when it is not.
+`/api/track?order=1001` correctly returns the order with
+`shipmentError: NO_SHIPMENT`.
 
-Scanned across the store's 109 orders (#1001-#1109): 91 have a shipment, 14 return
-404, 4 return 5xx.
+**Use 1010 or higher to see delivery data.**
+
+Out of the 109 orders in the store (#1001 to #1109): 91 have delivery data, 14 have
+none, and 4 give an error.
 
 | Delivery status | Orders |
 | --- | --- |
@@ -560,77 +467,198 @@ Scanned across the store's 109 orders (#1001-#1109): 91 have a shipment, 14 retu
 | `RETURN_PICKED_UP` | 1060, 1066, 1086 |
 | `RETURNED` | 1018, 1027, 1031, 1074 |
 
-Edge cases worth wiring into UI work:
+Useful ones for testing the page design:
 
-| Case | Orders | What the response looks like |
+| What you want to test | Orders | What comes back |
 | --- | --- | --- |
-| No shipment yet | 1001-1009, 1028, 1037, 1041, 1044, 1059 | `shipment: null`, `shipmentError.code: NO_SHIPMENT` |
-| Upstream 500 | 1029, 1064, 1081 | `shipmentError.code: STATUS_UNAVAILABLE` |
-| Upstream 503 / slow | 1034 | `STATUS_UNAVAILABLE`, or `STATUS_TIMEOUT` when it exceeds the timeout |
-| Return flow (`flow: "return"`) | 1018, 1019, 1027, 1031, 1051, 1060, 1063, 1066, 1071, 1074, 1086, 1087 | |
-| Very long `status_label` | 1025, 1075 | A label that must wrap or truncate in the UI |
-| Cancelled in Shopify | 1043, 1065, 1082, 1102, 1105 | `statusSource: "shopify"`, tracking suppressed |
+| No delivery data yet | 1001-1009, 1028, 1037, 1041, 1044, 1059 | `shipment: null` and `NO_SHIPMENT` |
+| The Status API is broken | 1029, 1064, 1081 | `STATUS_UNAVAILABLE` |
+| The Status API is slow or down | 1034 | `STATUS_UNAVAILABLE` or `STATUS_TIMEOUT` |
+| A return instead of a delivery | 1018, 1019, 1027, 1031, 1051, 1060, 1063, 1066, 1071, 1074, 1086, 1087 | `flow: "return"` |
+| A very long status label | 1025, 1075 | Text that has to wrap or be cut short |
+| Cancelled in Shopify | 1043, 1065, 1082, 1102, 1105 | `statusSource: "shopify"`, no tracking shown |
 
-Note that 1065 and 1105 are cancelled in Shopify while the Status API still reports
-`IN_TRANSIT` — these are the orders that exercise the
-[conflict rule](#conflict-rules-who-wins).
+Orders 1065 and 1105 are interesting: Shopify says they are cancelled, but the Status
+API still says `IN_TRANSIT`. They are the ones that test the rule below.
 
 ---
 
-## Testing
+## When the two services disagree
+
+Shopify and the Status API can tell us different things. The rules are always the
+same:
+
+1. **Shopify decides whether an order is cancelled.** If Shopify says cancelled, the
+   answer says cancelled, whatever the Status API thinks. We do not even call the
+   Status API. `statusSource` becomes `"shopify"`.
+2. **A cancelled order shows no tracking, no delivery date and no later steps.** They
+   would only mislead the shopper. It shows just "Order Placed" then "Cancelled".
+3. **The Status API decides where the parcel is**, for every order that is not
+   cancelled.
+4. **The order number has to match exactly.** Shopify's search is fuzzy, so searching
+   for `#1001` can also return `#10011`. Anything that is not an exact match counts
+   as not found.
+
+---
+
+## How the code is arranged
+
+```
+api/                        thin wrappers for Vercel
+  index.js                  ->  /     health check
+  track.js                  ->  /api/track
+  orders/index.js           ->  /api/orders
+  orders/[order].js         ->  /api/orders/:orderNumber
+src/
+  health-handler.js         the health check
+  handler.js                /api/track
+  order-list-handler.js     /api/orders
+  order-details-handler.js  /api/orders/:orderNumber
+  order-list.js             checks the filters on /api/orders
+  routes.js                 service name, version, endpoint list
+  validate.js               checks order numbers
+  auth.js                   checks the admin key
+  config.js                 reads the settings
+  cors.js                   CORS headers for the public endpoint
+  errors.js                 one error type for everything
+  shopify.js                talks to Shopify
+  status-api.js             talks to the Status API
+  merge.js                  turns replies into the public shape
+  order-details.js          turns replies into the full order shape
+scripts/
+  routes.js                 prints the endpoint list
+  sweep.js                  tries every test order and prints a table
+test/                       tests, no internet needed
+dev-server.js               runs it on your machine
+vercel.json                 one line: make / go to /api
+```
+
+**The files in `api/` do almost nothing.** Each one just passes
+`{ method, url, apiKey }` to the real code in `src/`, then writes the reply back out.
+The code in `src/` knows nothing about Vercel or web servers. That means two things:
+it can be tested without starting a server, and moving to a different host only means
+rewriting four small files.
+
+**Every handler can be given fake helpers.** Each one takes a `deps` object that
+defaults to the real Shopify and Status API code. Tests pass in fakes and count how
+many times each was called. That is how we **prove** no API call was made when a
+request was rejected, instead of just hoping.
+
+### Talking to Shopify
+
+`src/shopify.js` deals with everything Shopify demands:
+
+- **It reuses the password.** Shopify gives us a temporary token. We keep it in
+  memory and reuse it until 5 minutes before it expires. If several requests arrive
+  at once, they share one token request instead of asking for one each.
+- **It retries.** Up to 3 tries. If Shopify says the token is bad, we get a new one
+  and try again. If Shopify is busy or broken, we wait and try again.
+- **It waits the right amount.** Shopify limits us by query cost, not by request
+  count. When we hit the limit, Shopify tells us how fast our budget refills, so we
+  wait exactly long enough instead of guessing.
+
+### Talking to the Status API
+
+`src/status-api.js` **never throws an error**. It always returns a result object.
+This is on purpose: if the delivery lookup fails, the shopper should still see their
+order.
+
+### Why we copy fields one by one
+
+`merge.js` and `order-details.js` list every field they want **by name**. Nothing is
+copied in bulk. This gives us:
+
+- **Privacy that does not depend on remembering.** If Shopify adds a new field
+  tomorrow, even a personal one, it is simply not copied. We never have to maintain a
+  list of things to block.
+- **A page that does not break on bad data.** A broken date becomes `null`, so the
+  page can say "Date unavailable" instead of "Invalid Date". An unknown delivery step
+  becomes `pending`. An unknown status becomes `null`.
+- **Safe links.** Only `http` and `https` links are kept, so a dangerous
+  `javascript:` link can never reach the page.
+- **Tidier text.** Shopify uses "Default Title" for products with no options, and we
+  turn that into `null` so the page does not print it. A missing label is built from
+  the code, so `HELD_AT_CUSTOMS` becomes "Held at customs".
+
+Personal data is kept out in two ways. First, we never **ask** for `customer`,
+`email`, `phone`, `shippingAddress`, `billingAddress` or `note`, so it never reaches
+this service at all. Second, a test checks that those values cannot appear in a reply
+even if Shopify sends them anyway.
+
+> `note` is left out on purpose. It looks harmless, but shoppers often type their
+> phone number or address into the order note.
+
+---
+
+## Tests
 
 ```bash
-npm test          # 94 tests
+npm test
 npm test -- --watch
 ```
 
-`node:test` only, no test framework. Nothing touches the network: upstream calls are
-either injected fakes or `t.mock.method(globalThis, 'fetch', ...)`.
+84 tests, using Node's own test runner. No test library, and nothing touches the
+internet.
 
-What the suite deliberately covers:
+The tests check, on purpose:
 
-- **Auth**: wrong keys, prefix keys, a key of the same length, unset key.
-- **"No upstream call was made"**, asserted via call counters, for every rejection
-  path — a bad key or a bad order number must not spend quota.
-- **Injection**: filters cannot smuggle extra Shopify search syntax.
-- **PII**: a built response cannot contain customer fields even when the fixture has
-  them.
-- **Degradation**: malformed timestamps, unknown enums, missing money, `null` nodes.
-- **Pagination**: multi-page line-item fetches, and stopping at the page cap.
+- **The key.** Wrong keys, keys that are only partly right, keys of the right length,
+  and no key at all.
+- **That no API call happened** when a request was rejected. A bad key or a bad order
+  number must not use up our allowance.
+- **That filters cannot be abused** to add extra Shopify search terms.
+- **That personal data cannot get through**, even when the fake Shopify reply
+  contains it.
+- **That bad data does not crash anything**: broken dates, unknown values, missing
+  prices, empty entries.
+- **That paging works**, including stopping at the limit.
 
-`npm run sweep -- ../order-numbers.txt` is the recon script: it runs real order
-numbers through both upstreams and prints a table of which edge cases each one
-exercises (unknown status codes, missing timestamps, items without a product). Raw
-responses land in `./recon`, which is gitignored.
+There is also a recon script:
+
+```bash
+npm run sweep -- ../order-numbers.txt
+```
+
+It runs real order numbers through both services and prints a table of what each one
+returns. Full replies are saved in `./recon`, which git ignores.
 
 ---
 
 ## Deploying
 
-Vercel zero-config: `api/**.js` become serverless functions automatically. Set the
-env vars in project settings and push. `dev-server.js` and `scripts/` are not part
-of the deployed surface.
+Vercel needs no setup. Every file in `api/` becomes its own function. Add the
+settings in the project settings page and push.
 
-Live at `https://middleware-neon.vercel.app`. Because `.env` is gitignored and never
-deployed, each variable in the [Configuration](#configuration) table has to be set
-in Vercel project settings separately — including `ADMIN_API_KEY`, without which the
-two `/api/orders*` routes answer `500 CONFIG_ERROR` instead of serving.
+It is live at `https://middleware-neon.vercel.app`.
 
-A quick way to tell whether the deployed instance is configured, without needing the
-key: `curl -s https://middleware-neon.vercel.app/api/orders` should answer `401
-UNAUTHORIZED`. A `500 CONFIG_ERROR` means `ADMIN_API_KEY` is missing in Vercel.
+`.env` is never uploaded, so **every setting has to be added in Vercel separately**,
+including `ADMIN_API_KEY`. Without it the `/api/orders` endpoints return
+`500 CONFIG_ERROR`.
 
-Nothing in the code is Vercel-specific beyond the three files in `api/`. The cores
-are plain `(req) => response` functions, so Cloudflare Workers or a long-running
-Node server need only a different adapter.
+To check a deployment is set up correctly without needing the key:
 
-### Rate limiting: the open question
+```bash
+curl -s https://middleware-neon.vercel.app/api/orders
+```
 
-`/api/track` is public, so any site can call it and spend the Shopify and Status API
-budgets. Right now the only backstops are Shopify's cost-based limiter and the
-Status API's own 30 req/min key — there is **no per-IP limit in this middleware**.
+A `401 UNAUTHORIZED` means it is fine. A `500 CONFIG_ERROR` means `ADMIN_API_KEY` is
+missing in Vercel.
 
-Before relying on this in production, add one at the edge (Vercel WAF, Cloudflare)
-or in `handleTrack`. A per-IP token bucket keyed on the order number would also
-blunt order-number enumeration, which is currently rate-limited only by how fast the
-upstreams answer.
+Only the four files in `api/` know anything about Vercel. Everything in `src/` is
+plain code, so moving to Cloudflare Workers or a normal Node server just needs four
+new wrapper files.
+
+---
+
+## What still needs doing
+
+**There is no rate limit.** `/api/track` is open to the whole internet, so anyone can
+call it over and over and use up our Shopify and Status API allowance. The only
+things slowing them down today are Shopify's own cost limit and the Status API's
+30-per-minute key.
+
+Order numbers also run in order (1001, 1002, 1003...), so someone could walk through
+them one by one.
+
+Before trusting this in production, add a limit per IP address. Either at the edge
+(Vercel WAF or Cloudflare) or in `handleTrack` itself.
