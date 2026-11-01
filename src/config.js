@@ -13,6 +13,14 @@ const positiveInt = (value, fallback) => {
   return Number.isInteger(n) && n > 0 ? n : fallback;
 };
 
+// Non-throwing variant for the health endpoint: reports the names of missing
+// required vars so a bad deploy is diagnosable without reading the logs.
+export const checkConfig = (env = process.env) => ({
+  ok: REQUIRED.every((key) => Boolean(env[key])),
+  missing: REQUIRED.filter((key) => !env[key]),
+  optional: { ADMIN_API_KEY: Boolean(env.ADMIN_API_KEY) },
+});
+
 export function getConfig(env = process.env) {
   const missing = REQUIRED.filter((key) => !env[key]);
   if (missing.length > 0) {

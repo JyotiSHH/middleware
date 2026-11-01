@@ -1,44 +1,8 @@
 // Prints every endpoint this middleware exposes: npm run routes
-// Single source of truth for the route table, shared with dev-server.js so the
-// startup banner and the docs can never drift apart.
+// The table itself lives in src/routes.js, so the CLI and the service can never
+// disagree about what exists.
 import { pathToFileURL } from 'node:url';
-
-export const ROUTES = [
-  {
-    method: 'GET',
-    path: '/api/track?order=1001',
-    auth: 'public',
-    summary: 'Order + shipment for the storefront tracking section',
-    file: 'api/track.js',
-  },
-  {
-    method: 'GET',
-    path: '/api/orders',
-    auth: 'x-api-key',
-    summary: 'List all orders, newest first, cursor-paginated',
-    file: 'api/orders/index.js',
-  },
-  {
-    method: 'GET',
-    path: '/api/orders/1001',
-    auth: 'x-api-key',
-    summary: 'Full detail for one order (money, fulfillments, SKUs)',
-    file: 'api/orders/[order].js',
-  },
-];
-
-export const QUERY_PARAMS = {
-  '/api/track': [['order', 'required. 1001 or #1001']],
-  '/api/orders': [
-    ['limit', '1-250, default 25'],
-    ['cursor', 'pageInfo.endCursor from the previous page'],
-    ['status', 'open | closed | cancelled | any'],
-    ['financialStatus', 'paid | pending | refunded | partially_refunded | ...'],
-    ['fulfillmentStatus', 'fulfilled | unfulfilled | partial | shipped | unshipped'],
-    ['createdAtMin', 'ISO 8601 date'],
-    ['createdAtMax', 'ISO 8601 date'],
-  ],
-};
+import { QUERY_PARAMS, ROUTES } from '../src/routes.js';
 
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
@@ -50,7 +14,7 @@ const RESET = '\x1b[0m';
 // Colour only when stdout is a terminal, so piping to a file stays clean.
 const paint = (code, s) => (process.stdout.isTTY ? `${code}${s}${RESET}` : s);
 
-export function printRoutes({ baseUrl = 'http://localhost:3000', params = true } = {}) {
+export function printRoutes({ baseUrl = 'https://middleware-neon.vercel.app', params = true } = {}) {
   const authLabel = (auth) =>
     auth === 'public' ? paint(GREEN, 'public   ') : paint(YELLOW, 'x-api-key');
 
@@ -77,7 +41,7 @@ export function printRoutes({ baseUrl = 'http://localhost:3000', params = true }
   console.log(paint(DIM, '  Full reference:        README.md\n'));
 }
 
-// Run directly (npm run routes) rather than imported by dev-server.js.
+// Only when run directly, not when imported for the banner.
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   printRoutes();
 }

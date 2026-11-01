@@ -2,6 +2,7 @@
 // Routes mirror the Vercel file layout; the banner comes from scripts/routes.js,
 // so this file never carries its own copy of the endpoint list.
 import http from 'node:http';
+import healthHandler from './api/index.js';
 import trackHandler from './api/track.js';
 import orderListHandler from './api/orders/index.js';
 import orderDetailsHandler from './api/orders/[order].js';
@@ -11,6 +12,8 @@ const PORT = Number(process.env.PORT) || 3000;
 
 // Mirrors the Vercel file routes: an exact path and one dynamic segment.
 const route = (pathname) => {
+  // '/' mirrors the vercel.json rewrite to /api.
+  if (pathname === '/' || pathname === '/api') return healthHandler;
   if (pathname === '/api/track') return trackHandler;
   if (pathname === '/api/orders') return orderListHandler;
   if (/^\/api\/orders\/[^/]+$/.test(pathname)) return orderDetailsHandler;

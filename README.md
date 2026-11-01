@@ -23,7 +23,7 @@ money and milestones — never their own address.
 cp .env.example .env     # then fill in the values
 npm run dev              # http://localhost:3000
 npm run routes           # print every endpoint
-npm test                 # 84 tests, no network required
+npm test                 # 94 tests, no network required
 ```
 
 **Deployed at** `https://middleware-neon.vercel.app` — every path below works
@@ -42,17 +42,63 @@ There are no dependencies — `package-lock.json` has an empty tree on purpose.
 
 | Method | Path | Auth | Returns |
 | --- | --- | --- | --- |
+| GET | `/` (and `/api`) | public | Health check |
 | GET | `/api/track?order=1001` | public | One order + live shipment, for the storefront |
 | GET | `/api/orders` | `x-api-key` | All orders, newest first, cursor-paginated |
 | GET | `/api/orders/1001` | `x-api-key` | Full detail for one order |
 
-`npm run routes` prints the same table in the terminal, and `npm run dev` prints it
-on startup. Both read `scripts/routes.js`, so the banner and this table cannot
-drift apart.
+`npm run routes` prints the same table in the terminal, reading `src/routes.js`, so
+the CLI and this table cannot drift apart.
 
-Every response is `application/json; charset=utf-8` with `Cache-Control: no-store`
-and `X-Content-Type-Options: nosniff`. Success is always `{ "ok": true, ... }` and
-failure is always `{ "ok": false, "error": { code, message, retryable } }`.
+Every response is `application/json; charset=utf-8` with `X-Content-Type-Options:
+nosniff`. Success is always `{ "ok": true, ... }` and failure is always
+`{ "ok": false, "error": { code, message, retryable } }`. Every response is
+`Cache-Control: no-store`.
+
+---
+
+### 0. `GET /` — public, health check
+
+The base URL is the health check. `/` rewrites to `/api` via `vercel.json`, so the
+bare domain answers instead of returning Vercel's 404 page.
+
+It makes **no upstream call**, so an uptime monitor can poll it as often as it likes
+for free, and it needs **no key** — a broken deploy has to stay diagnosable before
+anything else works.
+
+```bash
+curl https://middleware-neon.vercel.app/
+```
+
+```json
+{
+  "ok": true,
+  "status": "ok",
+  "service": "order-tracking-middleware",
+  "version": "1.0.0",
+  "uptimeSeconds": 2,
+  "timestamp": "2026-11-01T18:02:11.427Z",
+  "checks": { "config": { "ok": true, "adminApiKey": true } }
+}
+```
+
+A missing required env var returns **503** with the **names** of what is missing, so
+an uptime monitor treats a misconfigured deploy as down:
+
+```json
+{
+  "ok": false,
+  "status": "unhealthy",
+  "service": "order-tracking-middleware",
+  "version": "1.0.0",
+  "uptimeSeconds": 0,
+  "timestamp": "2026-11-01T18:02:11.427Z",
+  "checks": { "config": { "ok": false, "missing": ["STATUS_API_KEY"] } }
+}
+```
+
+Values are never included, only names. `uptimeSeconds` is per serverless instance,
+so it resets on a cold start.
 
 ---
 
@@ -68,7 +114,7 @@ it does mean anyone can spend the upstream quotas. See
 | `order` | yes | `1001` or `#1001`. Digits only, max 10. |
 
 ```bash
-curl "http://localhost:3000/api/track?order=1001"
+curl "https://middleware-neon.vercel.app/api/track?order=1001"
 ```
 
 ```json
@@ -147,7 +193,7 @@ All orders, newest first (`sortKey: CREATED_AT, reverse: true`).
 | `createdAtMax` | - | ISO 8601 |
 
 ```bash
-curl -H "x-api-key: $ADMIN_API_KEY" "http://localhost:3000/api/orders?limit=25&status=open"
+curl -H "x-api-key: $ADMIN_API_KEY" \n  "https://middleware-neon.vercel.app/api/orders?limit=25&status=open"
 ```
 
 ```json
@@ -200,7 +246,7 @@ The endpoint returns one page. Loop on the cursor:
 C=""
 while :; do
   R=$(curl -s -H "x-api-key: $ADMIN_API_KEY" \
-      "http://localhost:3000/api/orders?limit=250&cursor=$C")
+      "https://middleware-neon.vercel.app/api/orders?limit=250&cursor=$C")
   echo "$R" | jq -c '.orders[]'
   [ "$(echo "$R" | jq -r .pageInfo.hasNextPage)" = true ] || break
   C=$(echo "$R" | jq -r .pageInfo.endCursor)
@@ -220,7 +266,7 @@ and per-item refund/fulfillment quantities — plus the same merged `shipment` b
 `/api/track` returns.
 
 ```bash
-curl -H "x-api-key: $ADMIN_API_KEY" http://localhost:3000/api/orders/1001
+curl -H "x-api-key: $ADMIN_API_KEY" https://middleware-neon.vercel.app/api/orders/1001
 ```
 
 ```json
@@ -389,14 +435,17 @@ here uses it, and not having it means a bug cannot leak customer data.
 
 ```
 api/                        thin platform adapters (Vercel file routes)
+  index.js                  ->  /api   (and / via vercel.json): health check
   track.js                  ->  /api/track
   orders/index.js           ->  /api/orders
   orders/[order].js         ->  /api/orders/:orderNumber
 src/
+  health-handler.js         core: the index health check
   handler.js                core: /api/track
   order-list-handler.js     core: /api/orders
   order-details-handler.js  core: /api/orders/:orderNumber
   order-list.js             query-string validation for the list endpoint
+  routes.js                 service name/version, and the route table for the CLI
   validate.js               order-number validation
   auth.js                   timing-safe admin key check
   config.js                 env -> config object, with a fail-fast check
@@ -407,10 +456,11 @@ src/
   merge.js                  upstream JSON -> the public order/shipment shape
   order-details.js          upstream JSON -> the full order shape
 scripts/
-  routes.js                 the route table; npm run routes, and the dev banner
+  routes.js                 npm run routes printer, and the dev banner
   sweep.js                  recon: run every test order through both upstreams
 test/                       node:test, no network, no fixtures on disk
 dev-server.js               local server mirroring the Vercel routes
+vercel.json                 one rewrite: / -> /api
 ```
 
 **Adapters are deliberately dumb.** Each `api/*.js` file does nothing but pass
@@ -530,7 +580,7 @@ Note that 1065 and 1105 are cancelled in Shopify while the Status API still repo
 ## Testing
 
 ```bash
-npm test          # 84 tests
+npm test          # 94 tests
 npm test -- --watch
 ```
 
