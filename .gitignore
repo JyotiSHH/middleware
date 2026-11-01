@@ -1,0 +1,45 @@
+# dependencies
+node_modules/
+
+# secrets: never commit real values.
+# .env holds the Shopify client secret, the Status API key and ADMIN_API_KEY.
+.env
+.env.*
+!.env.example
+.dev.vars
+
+# local recon output from scripts/sweep.js (contains real order data)
+recon/
+
+# platform
+.vercel/
+
+# logs
+*.log
+npm-debug.log*
+
+# test + coverage output
+coverage/
+.nyc_output/
+
+# Shopify CLI (theme dev server, pulled theme files)
+.shopify/
+
+# editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS clutter
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# misc local junk
+.cache/
+*.tmp
+.node_repl_history
+*.tgz

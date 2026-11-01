@@ -1,0 +1,16 @@
+{
+  "name": "order-tracking-middleware",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PII-free HTTP middleware that merges Shopify order data with Status API shipment data for the storefront order tracking section.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.6"
+  },
+  "scripts": {
+    "dev": "node --env-file=.env dev-server.js",
+    "test": "node --test",
+    "routes": "node scripts/routes.js",
+    "sweep": "node --env-file=.env scripts/sweep.js"
+  }
+}
